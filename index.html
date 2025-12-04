@@ -13,22 +13,20 @@
     <style>
         /* 應用字體 */
         body { font-family: 'Inter', sans-serif; }
-        /* 設置拖曳樣式 */
-        .drag-active { 
-            opacity: 0.95; 
-            /* *** 修正: 移除 scale，以確保游標和卡片中心完美對齊 *** */
-            /* transform: scale(1.05); */ 
-            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2); 
-            cursor: grabbing !important; 
+        
+        /* 拖曳時的視覺效果 */
+        .drag-source { 
+            opacity: 0.4; 
+            box-shadow: none;
+            border: 2px dashed #4a4a4a;
+        }
+
+        /* 放置目標的視覺效果 */
+        .drag-over { 
+            background-color: #d1d5db; /* gray-300 */
         }
         .drop-target { transition: all 0.2s ease-in-out; }
         
-        /* NEW: 浮動樣式 - 用於卡片被拿起時 */
-        .is-floating {
-            position: fixed !important;
-            z-index: 1000;
-        }
-
         /* 車隊卡片基礎樣式 */
         .team-card { 
             cursor: grab; 
@@ -36,49 +34,47 @@
             display: flex !important;
             align-items: center;
             justify-content: flex-start; 
-            /* 關鍵：防止手機上拖曳變成選取文字和電腦版拖曳抖動 */
+            /* 關鍵：允許原生拖曳，但防止移動端誤觸選取 */
             -webkit-user-select: none;
             user-select: none;
-            touch-action: none;
+            touch-action: pan-y; /* 允許垂直滾動，但鎖定水平拖曳 */
         }
         .team-card:active { transform: scale(1.02); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
 
-        /* 針對截圖時需要隱藏的元素 */
-        .hidden-on-screenshot {
-            display: flex;
-        }
-        .hidden-on-screenshot.hide {
-            display: none !important;
-        }
-        
-        /* 內容區塊容器：確保橫向擴展 */
+        /* 內容佈局 */
         .team-info-container {
             display: flex;
             align-items: center;
             flex-grow: 1; 
             min-width: 0; 
-            /* 確保這個內容容器在父元素（卡片）內不會溢出 */
             overflow: hidden; 
         }
 
-        /* 調整車隊名稱和車手資訊的佈局：垂直 (column) */
+        /* 垂直排列的隊名和車手 */
         .team-info {
             display: flex;
-            flex-direction: column; /* 垂直排列 */
-            align-items: flex-start; /* 左對齊 */
+            flex-direction: column; 
+            align-items: flex-start; 
             flex-grow: 1;
             min-width: 0; 
         }
         
-        /* 確保車手名稱可以自由換行，並減少間距，使其垂直排列更緊湊 */
         .driver-names {
-            white-space: normal; /* 允許換行 */
-            margin-left: 0; /* 移除水平間隔 */
-            line-height: 1.2; /* 縮小行高 */
+            white-space: normal; 
+            margin-left: 0; 
+            line-height: 1.2; 
         }
         
         .driver-names span {
-            display: block; /* 確保每個車手名字佔一行 */
+            display: block; 
+        }
+
+        /* 截圖隱藏元素 */
+        .hidden-on-screenshot {
+            display: flex;
+        }
+        .hidden-on-screenshot.hide {
+            display: none !important;
         }
         
     </style>
@@ -154,41 +150,13 @@
 
         const RANKING_COUNT = 11; 
         
-        // --- 通用拖曳狀態和邏輯 (Touch & Mouse) ---
-        let draggedCard = null;
-        let currentDropTarget = null;
-        let isDragging = false;
-        let offsetX = 0;
-        let offsetY = 0;
-        let originalParent = null;
-        let originalIndex = -1; // 記錄卡片在父元素中的原始索引
+        let draggedId = null; // 儲存當前拖曳的卡片 ID
 
         document.addEventListener('DOMContentLoaded', () => {
             initializeApp();
-            // 監聽全局的 mouseup 和 touchend，以結束拖曳
-            document.addEventListener('mouseup', endDrag);
-            document.addEventListener('touchend', endDrag);
-            document.addEventListener('mousemove', moveDrag);
-            document.addEventListener('touchmove', moveDrag);
         });
 
-        /**
-         * 獲取座標下的有效放置目標 (排名空位或未排名區)
-         */
-        function getTarget(x, y) {
-            if (draggedCard) draggedCard.style.display = 'none'; // 暫時隱藏拖曳元素
-            let element = document.elementFromPoint(x, y);
-            if (draggedCard) draggedCard.style.display = 'flex'; // 恢復可見
-
-            // 尋找最近的 drop-target 或 unranked-teams 區塊
-            while (element) {
-                if (element.classList.contains('drop-target') || element.id === 'unranked-teams') {
-                    return element;
-                }
-                element = element.parentElement;
-            }
-            return null;
-        }
+        // --- 拖曳輔助函數 ---
 
         /**
          * 將卡片按 TEAMS 陣列中的原始順序插入到未排名區。
@@ -197,7 +165,7 @@
         function insertCardIntoUnrankedSorted(card) {
             const cardOriginalIndex = TEAMS.findIndex(t => t.id === card.id);
             const unrankedContainer = document.getElementById('unranked-teams');
-            const unrankedChildren = Array.from(unrankedContainer.children).filter(child => child.id !== card.id && child.id !== 'drag-placeholder');
+            const unrankedChildren = Array.from(unrankedContainer.children).filter(child => child.id !== card.id);
 
             let insertBeforeNode = null;
             for (let i = 0; i < unrankedChildren.length; i++) {
@@ -223,189 +191,92 @@
             }
         }
 
+        // --- 原生拖曳事件處理 ---
 
-        // --- 拖曳開始邏輯 (Touch & Mouse) ---
-        function startDrag(e, card) {
-            // 檢查是否已經在拖曳或是否為多點觸控
-            if (isDragging || (e.touches && e.touches.length !== 1)) return;
+        function handleDragStart(e) {
+            const card = e.currentTarget;
+            draggedId = card.id;
+            e.dataTransfer.setData('text/plain', draggedId);
             
-            // 阻止觸控螢幕預設行為（例如長按選取文字或頁面滾動）
-            if (e.type.startsWith('touch')) e.preventDefault(); 
-            // 阻止桌面滑鼠選取行為
-            if (e.type.startsWith('mouse')) e.preventDefault(); 
+            // 設定拖曳視覺效果：讓原始卡片變透明
+            setTimeout(() => card.classList.add('drag-source'), 0);
+        }
 
-            draggedCard = card; 
-            isDragging = true;
-            draggedCard.classList.add('drag-active');
-            
-            // NEW: 記錄原始父元素和索引
-            originalParent = card.parentElement;
-            originalIndex = Array.from(originalParent.children).indexOf(card);
+        function handleDragEnd(e) {
+            e.currentTarget.classList.remove('drag-source');
+            draggedId = null;
+        }
 
-
-            // 設置位置屬性，開始視覺拖曳模擬
-            draggedCard.classList.add('is-floating'); // 使用新浮動樣式
-            draggedCard.classList.remove('flex-grow'); // 移除 flex-grow 確保固定寬度
-
-            draggedCard.style.width = card.offsetWidth + 'px'; // 固定寬度
-
-            // 確定起始座標和偏移量
-            const rect = draggedCard.getBoundingClientRect();
-            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
-            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
-            
-            // *** 關鍵修正：中心對齊游標/觸控點 ***
-            offsetX = rect.width / 2; 
-            offsetY = rect.height / 2;
-
-            // 移動卡片到觸控/滑鼠起始位置
-            draggedCard.style.left = (clientX - offsetX) + 'px';
-            draggedCard.style.top = (clientY - offsetY) + 'px';
-
-            // --- 創建佔位符以防止列表跳動 (僅當從未排名區拖曳時) ---
-            const unrankedContainer = document.getElementById('unranked-teams');
-            if (card.parentElement === unrankedContainer) {
-                const placeholder = document.createElement('div');
-                placeholder.id = 'drag-placeholder';
-                
-                // 複製卡片的尺寸和外觀
-                const rect = draggedCard.getBoundingClientRect();
-                placeholder.style.height = rect.height + 'px';
-                placeholder.style.backgroundColor = '#e5e7eb'; 
-                placeholder.style.borderRadius = '0.5rem';
-                placeholder.style.transition = 'none'; // 無需過渡
-                placeholder.style.marginBottom = '0.75rem'; // Tailwind space-y-3 相當於 mb-3 (0.75rem)
-                
-                card.parentElement.insertBefore(placeholder, card.nextSibling || card); 
+        function handleDragOver(e) {
+            // 阻止預設處理，以允許放置
+            e.preventDefault(); 
+            // 視覺回饋
+            if (e.currentTarget.classList.contains('drop-target')) {
+                e.currentTarget.classList.add('drag-over');
             }
         }
 
-        // --- 拖曳移動邏輯 (Touch & Mouse) ---
-        function moveDrag(e) {
-            if (!isDragging) return;
-            
-            // 阻止觸控螢幕預設行為（例如頁面滾動）
-            if (e.type.startsWith('touch')) e.preventDefault(); 
-
-            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
-            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
-
-            // 更新卡片位置
-            draggedCard.style.left = (clientX - offsetX) + 'px';
-            draggedCard.style.top = (clientY - offsetY) + 'px';
-
-            // 檢查放置目標
-            const target = getTarget(clientX, clientY);
-
-            if (target !== currentDropTarget) {
-                // 離開舊目標
-                if (currentDropTarget) {
-                    currentDropTarget.classList.remove('bg-gray-200');
-                }
-                // 進入新目標
-                if (target) {
-                    target.classList.add('bg-gray-200');
-                }
-                currentDropTarget = target;
-            }
+        function handleDragLeave(e) {
+            // 移除視覺回饋
+            e.currentTarget.classList.remove('drag-over');
         }
 
-        // --- 拖曳結束邏輯 (Touch & Mouse) ---
-        function endDrag() {
-            if (!isDragging) return;
+        function handleDrop(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('drag-over');
 
-            isDragging = false;
+            const targetSlot = e.currentTarget;
+            const cardId = draggedId;
+            const card = document.getElementById(cardId);
             
-            // 恢復視覺狀態
-            draggedCard.classList.remove('drag-active');
-            
-            // --- 移除佔位符 ---
-            const placeholder = document.getElementById('drag-placeholder');
-            if (placeholder) {
-                placeholder.remove();
-            }
+            if (!card || !targetSlot) return;
 
-            // 如果找到有效的放置目標，執行放置邏輯
-            if (currentDropTarget) {
-                currentDropTarget.classList.remove('bg-gray-200');
-                executeDrop(draggedCard, currentDropTarget);
-            } else {
-                // --- 關鍵修正：如果拖曳失敗，將卡片插回原始位置或排序位置 ---
-                
-                // 確保卡片從當前位置移除（如果它在 DOM 中）
-                if (draggedCard.parentElement) {
-                    draggedCard.parentElement.removeChild(draggedCard);
-                }
-
-                if (originalParent && originalParent.id === 'unranked-teams') {
-                    // 如果來自未排名區且放手失敗：插回排序位置
-                    insertCardIntoUnrankedSorted(draggedCard);
-                } else if (originalParent && originalParent.id.startsWith('rank-')) {
-                    // 如果來自排名區且放手失敗：直接放回該排名框
-                    originalParent.appendChild(draggedCard);
-                } else {
-                    // 終極備用：放到未排名區末尾
-                    const unrankedContainer = document.getElementById('unranked-teams');
-                    unrankedContainer.appendChild(draggedCard);
-                }
-                showMessage('拖曳取消，卡片已返回原位。', 'bg-red-100 text-red-800');
-            }
-
-            // 重置卡片的定位樣式，讓它重新進入正常的文檔流
-            draggedCard.classList.remove('is-floating'); // 移除浮動樣式
-            draggedCard.classList.add('flex-grow'); // 恢復 flex-grow
-            draggedCard.style.width = 'auto'; 
-            draggedCard.style.left = '';
-            draggedCard.style.top = '';
-
-            draggedCard = null;
-            currentDropTarget = null;
-            originalParent = null;
-            originalIndex = -1;
-        }
-
-        // --- 核心放置邏輯 ---
-        function executeDrop(card, targetSlot) {
+            // 處理放置邏輯
             if (targetSlot.id.startsWith('rank-')) {
                 // 目標是排名空位
                 const existingCard = targetSlot.querySelector('.team-card');
                 
-                if (existingCard && existingCard !== card) {
+                // 檢查 card 是否來自當前目標 (防止重複操作)
+                if (existingCard === card) return;
+
+                if (existingCard) {
                     // 交換邏輯：將舊卡片送回未排名區，將新卡片放入空位
-                    insertCardIntoUnrankedSorted(existingCard); // 使用排序插入輔助函數
-                    targetSlot.appendChild(card);
                     
-                } else if (!existingCard) {
-                    // 空位：直接放入
-                    targetSlot.appendChild(card);
+                    // 舊卡片會被替換，將其取出並排序
+                    if (existingCard.parentElement) {
+                        existingCard.parentElement.removeChild(existingCard);
+                    }
+                    insertCardIntoUnrankedSorted(existingCard); 
+                    targetSlot.appendChild(card); 
                     
                 } else {
-                    // 放回自己的空位
-                    if (card.parentElement !== targetSlot) {
-                        targetSlot.appendChild(card);
-                    }
+                    // 空位：直接放入
+                    targetSlot.appendChild(card); 
                 }
             } else if (targetSlot.id === 'unranked-teams') {
                 // 目標是未排名區 (將卡片插回原始排序位置)
-                insertCardIntoUnrankedSorted(card); // 使用排序插入輔助函數
+                insertCardIntoUnrankedSorted(card); 
             }
             
             showMessage('排名已更新！', 'bg-blue-100 text-blue-800');
         }
 
+        // --- 初始化和頁面邏輯 ---
 
-        /**
-         * 初始化應用程序：生成排名空位和車隊卡片
-         */
         function initializeApp() {
             createRankingSlots();
             createTeamCards(TEAMS, 'unranked-teams');
-            loadPrediction(); // 嘗試從本地儲存載入預測
+            loadPrediction(); 
+            
+            // 針對所有放置區域添加監聽器
+            const dropTargets = document.querySelectorAll('.drop-target, #unranked-teams');
+            dropTargets.forEach(target => {
+                target.addEventListener('dragover', handleDragOver);
+                target.addEventListener('dragleave', handleDragLeave);
+                target.addEventListener('drop', handleDrop);
+            });
         }
         
-        /**
-         * 生成排名空位 (1st - 11th)
-         */
         function createRankingSlots() {
             const slotsContainer = document.getElementById('ranking-slots');
             const rankSuffixes = ['st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th', 'th', 'th'];
@@ -422,9 +293,6 @@
             }
         }
 
-        /**
-         * 生成車隊卡片並插入到指定的容器
-         */
         function createTeamCards(teams, containerId) {
             const container = document.getElementById(containerId);
             container.innerHTML = ''; 
@@ -433,7 +301,9 @@
                 const card = document.createElement('div');
                 card.id = team.id;
                 
-                // 關鍵修正：p-2 (縮小內邊距) 和 flex-grow (填滿剩餘空間)
+                // 啟用原生 Drag and Drop
+                card.draggable = true; 
+                
                 card.className = `team-card bg-white text-gray-900 ${team.border || ''} p-2 flex-grow rounded-lg shadow-md overflow-hidden`;
                 
                 const logoBgColor = team.color; 
@@ -464,21 +334,18 @@
                     </div>
                 `;
 
-                card.addEventListener('mousedown', (e) => startDrag(e, card));
-                card.addEventListener('touchstart', (e) => startDrag(e, card));
+                // 註冊原生拖曳事件
+                card.addEventListener('dragstart', handleDragStart);
+                card.addEventListener('dragend', handleDragEnd);
                 
                 container.appendChild(card);
             });
         }
         
-        /**
-         * 重設所有排名，將所有車隊卡片移回未排名區
-         */
         function resetRanking() {
             const allTeams = [...document.querySelectorAll('.team-card')];
             const unrankedContainer = document.getElementById('unranked-teams');
             
-            // 按照原始順序重新排序 (確保重設後順序一致)
             const sortedTeams = allTeams.sort((a, b) => {
                 const teamA = TEAMS.find(t => t.id === a.id);
                 const teamB = TEAMS.find(t => t.id === b.id);
@@ -492,14 +359,10 @@
                 unrankedContainer.appendChild(card);
             });
 
-            // 清除本地儲存
             localStorage.removeItem('f1_2026_ranking');
             showMessage('排名已重設。', 'bg-red-100 text-red-800');
         }
 
-        /**
-         * 儲存目前的排名到瀏覽器的 localStorage
-         */
         function savePrediction() {
             const ranking = [];
             for (let i = 1; i <= RANKING_COUNT; i++) {
@@ -509,7 +372,7 @@
                 if (teamCard) {
                     ranking.push({ rank: i, teamId: teamCard.id });
                 } else {
-                    ranking.push({ rank: i, teamId: null }); // 記錄空位
+                    ranking.push({ rank: i, teamId: null }); 
                 }
             }
             
@@ -517,15 +380,12 @@
             showMessage('預測排名已儲存到您的瀏覽器！', 'bg-green-100 text-green-800');
         }
 
-        /**
-         * 從 localStorage 載入儲存的排名
-         */
         function loadPrediction() {
             const storedRanking = localStorage.getItem('f1_2026_ranking');
             if (!storedRanking) return;
 
             const ranking = JSON.parse(storedRanking);
-            let teamsToKeep = [...TEAMS.map(t => t.id)]; // 所有車隊 ID
+            let teamsToKeep = [...TEAMS.map(t => t.id)]; 
 
             ranking.forEach(item => {
                 if (item.teamId) {
@@ -551,27 +411,19 @@
             showMessage('已載入您上次儲存的排名！', 'bg-yellow-100 text-yellow-800');
         }
 
-        /**
-         * 截圖並下載目前的預測結果
-         */
         function capturePrediction() {
             const captureArea = document.getElementById('capture-target');
             const buttonsContainer = document.querySelector('.hidden-on-screenshot');
             
-            // 1. 隱藏不應出現在截圖中的元素 (按鈕組)
             buttonsContainer.classList.add('hide');
             
-            // 2. 顯示加載訊息
             showMessage('正在生成圖片，請稍候...', 'bg-blue-100 text-blue-800');
             
-            // 3. 使用 html2canvas 截圖
-            // 設置 scale 以提高圖片解析度，適用於移動設備
             html2canvas(captureArea, { 
-                scale: window.devicePixelRatio * 2, // 提高解析度
+                scale: window.devicePixelRatio * 2, 
                 useCORS: true,
                 allowTaint: true 
             }).then(canvas => {
-                // 4. 將 Canvas 轉換為圖片連結並下載
                 const image = canvas.toDataURL('image/png');
                 const link = document.createElement('a');
                 link.download = 'F1_2026_Ranking_Prediction.png';
@@ -583,21 +435,16 @@
                 console.error('截圖失敗:', error);
                 showMessage('截圖失敗，請檢查瀏覽器設定或重新嘗試。', 'bg-red-100 text-red-800');
             }).finally(() => {
-                // 5. 重新顯示隱藏的元素
                 buttonsContainer.classList.remove('hide');
             });
         }
 
-        /**
-         * 顯示訊息
-         */
         function showMessage(text, className) {
             const msgBox = document.getElementById('message-box');
             msgBox.textContent = text;
             msgBox.className = `mt-4 p-3 text-sm rounded-lg text-center ${className}`;
             msgBox.classList.remove('hidden');
             
-            // 5 秒後自動隱藏
             setTimeout(() => {
                 msgBox.classList.add('hidden');
             }, 5000);
